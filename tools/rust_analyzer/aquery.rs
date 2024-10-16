@@ -1,117 +1,53 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Deserialize;
 
+use crate::rust_project::TargetKind;
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AqueryOutput {
     artifacts: Vec<Artifact>,
     actions: Vec<Action>,
-    #[serde(rename = "pathFragments")]
     path_fragments: Vec<PathFragment>,
     targets: Vec<Target>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Artifact {
     id: u32,
-    #[serde(rename = "pathFragmentId")]
     path_fragment_id: u32,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PathFragment {
     id: u32,
     label: String,
-    #[serde(rename = "parentId")]
     parent_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Target {
     id: u32,
     label: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Action {
-    #[serde(rename = "outputIds")]
     output_ids: Vec<u32>,
-    #[serde(rename = "targetId")]
     target_id: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CrateType {
-    Bin,
-    Rlib,
-    Lib,
-    Dylib,
-    Cdylib,
-    Staticlib,
-    ProcMacro,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BazelCrateSpec {
-    pub aliases: BTreeMap<String, String>,
-    pub crate_id: String,
-    pub display_name: String,
-    pub edition: String,
-    pub root_module: String,
-    pub is_workspace_member: bool,
-    pub deps: BTreeSet<String>,
-    pub proc_macro_dylib_path: Option<String>,
-    pub source: Option<CrateSpecSource>,
-    pub cfg: Vec<String>,
-    pub env: BTreeMap<String, String>,
-    pub target: String,
-    pub crate_type: CrateType,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BazelTarget(String);
-
-impl BazelTarget {
-    pub fn new(s: &str) -> Self {
-        Self(s.to_owned())
-    }
-
-    pub fn build_file(&self, workspace: &Path) -> anyhow::Result<Option<PathBuf>> {
-        if self.0.starts_with("@") {
-            // External targets don't have a BUILD.bazel file in the repository.
-            return Ok(None);
-        }
-
-        if !self.0.starts_with("//") {
-            return Err(anyhow::anyhow!("Failed to parse bazel target: {}", self.0));
-        }
-
-        let mut build_file = PathBuf::new();
-        build_file.push(workspace);
-        build_file.push(
-            self.0
-                .split(":")
-                .next()
-                .unwrap_or(&self.0)
-                .trim_start_matches("/"), // remove the '//' characters at the begginning of the target path
-        );
-        build_file.push("BUILD.bazel");
-        Ok(Some(build_file))
-    }
-
-    pub fn as_string(&self) -> String {
-        self.0.clone()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CrateSpec {
     pub aliases: BTreeMap<String, String>,
     pub crate_id: String,
@@ -126,46 +62,47 @@ pub struct CrateSpec {
     pub env: BTreeMap<String, String>,
     pub target: String,
     pub crate_type: CrateType,
-    // additional metadata
-    pub build_file: Option<PathBuf>,
-    pub bazel_target: BazelTarget,
+    pub build_file: Option<Utf8PathBuf>,
+    pub bazel_target: String,
 }
 
-impl CrateSpec {
-    fn new(workspace: &Path, target: BazelTarget, spec: BazelCrateSpec) -> anyhow::Result<Self> {
-        let build_file = target.build_file(workspace)?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CrateType {
+    Bin,
+    Rlib,
+    Lib,
+    Dylib,
+    Cdylib,
+    Staticlib,
+    ProcMacro,
+}
 
-        Ok(Self {
-            aliases: spec.aliases,
-            crate_id: spec.crate_id,
-            display_name: spec.display_name,
-            edition: spec.edition,
-            root_module: spec.root_module,
-            is_workspace_member: spec.is_workspace_member,
-            deps: spec.deps,
-            proc_macro_dylib_path: spec.proc_macro_dylib_path,
-            source: spec.source,
-            cfg: spec.cfg,
-            env: spec.env,
-            target: spec.target,
-            crate_type: spec.crate_type,
-            bazel_target: target,
-            build_file,
-        })
+impl From<CrateType> for TargetKind {
+    fn from(value: CrateType) -> Self {
+        match value {
+            CrateType::Bin => TargetKind::Bin,
+            CrateType::Rlib
+            | CrateType::Lib
+            | CrateType::Dylib
+            | CrateType::Cdylib
+            | CrateType::Staticlib
+            | CrateType::ProcMacro => TargetKind::Lib,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CrateSpecSource {
-    pub exclude_dirs: Vec<String>,
-    pub include_dirs: Vec<String>,
+    pub exclude_dirs: Vec<Utf8PathBuf>,
+    pub include_dirs: Vec<Utf8PathBuf>,
 }
 
 pub fn get_crate_specs(
-    bazel: &Path,
-    workspace: &Path,
-    execution_root: &Path,
+    bazel: &Utf8Path,
+    workspace: &Utf8Path,
+    execution_root: &Utf8Path,
     targets: &[String],
     rules_rust_name: &str,
 ) -> anyhow::Result<BTreeSet<CrateSpec>> {
@@ -193,25 +130,25 @@ pub fn get_crate_specs(
     let crate_spec_files =
         parse_aquery_output_files(execution_root, &String::from_utf8(aquery_output.stdout)?)?;
 
-    let crates = crate_spec_files
-        .into_iter()
-        .map(|(target, file)| {
-            let f = File::open(&file)
-                .with_context(|| format!("Failed to open file: {}", file.display()))?;
-            let spec = serde_json::from_reader(f)
-                .with_context(|| format!("Failed to deserialize file: {}", file.display()))?;
+    let mut crates = Vec::new();
+    for (label, files) in crate_spec_files {
+        for file in files {
+            let f = File::open(&file).with_context(|| format!("Failed to open file: {file}"))?;
+            let mut spec: CrateSpec = serde_json::from_reader(f)
+                .with_context(|| format!("Failed to deserialize file: {file}"))?;
 
-            CrateSpec::new(workspace, target, spec)
-        })
-        .collect::<anyhow::Result<Vec<CrateSpec>>>()?;
+            spec.build_file = label_to_build_file(&label, workspace);
+            crates.push(spec);
+        }
+    }
 
     consolidate_crate_specs(crates)
 }
 
 fn parse_aquery_output_files(
-    execution_root: &Path,
+    execution_root: &Utf8Path,
     aquery_stdout: &str,
-) -> anyhow::Result<Vec<(BazelTarget, PathBuf)>> {
+) -> anyhow::Result<BTreeMap<String, Vec<Utf8PathBuf>>> {
     let out: AqueryOutput = serde_json::from_str(aquery_stdout).map_err(|_| {
         // Parsing to `AqueryOutput` failed, try parsing into a `serde_json::Value`:
         match serde_json::from_str::<serde_json::Value>(aquery_stdout) {
@@ -241,24 +178,24 @@ fn parse_aquery_output_files(
         .map(|t| (t.id, t.label.clone()))
         .collect::<BTreeMap<_, _>>();
 
-    let mut output_files: Vec<(BazelTarget, PathBuf)> = Vec::new();
+    let mut output_files = BTreeMap::new();
     for action in out.actions {
-        let target = targets.get(&action.target_id).expect(
-            format!(
-                "internal consistency error in bazel output: missing target for {}",
-                action.target_id
-            )
-            .as_str(),
-        );
+        let target = targets
+            .get(&action.target_id)
+            .cloned()
+            .expect("internal consistency error in bazel output: missing target");
+
+        let entry: &mut Vec<_> = output_files.entry(target).or_default();
 
         for output_id in action.output_ids {
             let artifact = artifacts
                 .get(&output_id)
                 .expect("internal consistency error in bazel output: missing artifact");
+
             let path = path_from_fragments(artifact.path_fragment_id, &path_fragments)?;
             let path = execution_root.join(path);
             if path.exists() {
-                output_files.push((BazelTarget::new(&target), path));
+                entry.push(path);
             } else {
                 log::warn!("Skipping missing crate_spec file: {:?}", path);
             }
@@ -271,15 +208,15 @@ fn parse_aquery_output_files(
 fn path_from_fragments(
     id: u32,
     fragments: &BTreeMap<u32, &PathFragment>,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Utf8PathBuf> {
     let path_fragment = fragments
         .get(&id)
         .expect("internal consistency error in bazel output");
 
     let buf = match path_fragment.parent_id {
         Some(parent_id) => path_from_fragments(parent_id, fragments)?
-            .join(PathBuf::from(&path_fragment.label.clone())),
-        None => PathBuf::from(&path_fragment.label.clone()),
+            .join(Utf8PathBuf::from(&path_fragment.label.clone())),
+        None => Utf8PathBuf::from(&path_fragment.label.clone()),
     };
 
     Ok(buf)
@@ -289,7 +226,7 @@ fn path_from_fragments(
 /// a rust_test depends on a rust_library, for example.
 fn consolidate_crate_specs(crate_specs: Vec<CrateSpec>) -> anyhow::Result<BTreeSet<CrateSpec>> {
     let mut consolidated_specs: BTreeMap<String, CrateSpec> = BTreeMap::new();
-    for mut spec in crate_specs.into_iter() {
+    for mut spec in crate_specs {
         log::debug!("{:?}", spec);
         if let Some(existing) = consolidated_specs.get_mut(&spec.crate_id) {
             existing.deps.extend(spec.deps);
@@ -323,6 +260,37 @@ fn consolidate_crate_specs(crate_specs: Vec<CrateSpec>) -> anyhow::Result<BTreeS
     Ok(consolidated_specs.into_values().collect())
 }
 
+fn label_to_build_file(label: &str, workspace: &Utf8Path) -> Option<Utf8PathBuf> {
+    if label.starts_with("@") {
+        // External targets don't have a BUILD.bazel file in the repository.
+        return None;
+    }
+
+    let path = label
+        .split(":")
+        .next()
+        .expect("first string element must exist in split")
+        .trim_start_matches("/"); // remove the '//' characters at the begginning of the target path
+
+    let build_bazel_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD.bazel".as_ref()]
+        .into_iter()
+        .collect();
+
+    if build_bazel_file.exists() {
+        return Some(build_bazel_file);
+    }
+
+    let build_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD".as_ref()]
+        .into_iter()
+        .collect();
+
+    if build_file.exists() {
+        return Some(build_file);
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -345,6 +313,10 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -360,6 +332,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -375,6 +349,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -390,6 +366,10 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "bin".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
             },
         ];
 
@@ -410,6 +390,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
                 CrateSpec {
                     aliases: BTreeMap::new(),
@@ -425,6 +407,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
                 CrateSpec {
                     aliases: BTreeMap::new(),
@@ -440,6 +424,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
             ])
         );
@@ -462,6 +448,10 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "bin".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -477,6 +467,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -492,6 +484,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -507,6 +501,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
         ];
 
@@ -527,6 +523,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
                 CrateSpec {
                     aliases: BTreeMap::new(),
@@ -542,6 +540,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
                 CrateSpec {
                     aliases: BTreeMap::new(),
@@ -557,6 +557,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "rlib".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                 },
             ])
         );
@@ -584,6 +586,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -599,6 +603,10 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "bin".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -614,6 +622,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "bin".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -629,6 +639,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "rlib".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
             },
         ];
 
@@ -650,6 +662,8 @@ mod test {
                         env: BTreeMap::new(),
                         target: "x86_64-unknown-linux-gnu".into(),
                         crate_type: "rlib".into(),
+                        build_file: None,
+                        bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                     },
                     CrateSpec {
                         aliases: BTreeMap::new(),
@@ -665,6 +679,8 @@ mod test {
                         env: BTreeMap::new(),
                         target: "x86_64-unknown-linux-gnu".into(),
                         crate_type: "rlib".into(),
+                        build_file: None,
+                        bazel_target: "//tools/rust_analyzer:gen_rust_project_lib".to_owned(),
                     },
                 ])
             );
@@ -694,6 +710,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "proc_macro".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_proc_macro".to_owned(),
             },
             CrateSpec {
                 aliases: BTreeMap::new(),
@@ -711,6 +729,8 @@ mod test {
                 env: BTreeMap::new(),
                 target: "x86_64-unknown-linux-gnu".into(),
                 crate_type: "proc_macro".into(),
+                build_file: None,
+                bazel_target: "//tools/rust_analyzer:gen_rust_project_proc_macro".to_owned(),
             },
         ];
 
@@ -734,6 +754,8 @@ mod test {
                     env: BTreeMap::new(),
                     target: "x86_64-unknown-linux-gnu".into(),
                     crate_type: "proc_macro".into(),
+                    build_file: None,
+                    bazel_target: "//tools/rust_analyzer:gen_rust_project_proc_macro".to_owned(),
                 },])
             );
         }
