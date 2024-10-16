@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::anyhow;
 use serde::Serialize;
 
-use crate::aquery::CrateSpec;
+use crate::aquery::{CrateSpec, CrateType};
 
 /// A `rust-project.json` workspace representation. See
 /// [rust-analyzer documentation][rd] for a thorough description of this interface.
@@ -74,6 +74,41 @@ pub struct Crate {
     /// For proc-macro crates, path to compiled proc-macro (.so file).
     #[serde(skip_serializing_if = "Option::is_none")]
     proc_macro_dylib_path: Option<String>,
+
+    /// Additional, build-specific data about a crate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<Build>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    Bin,
+    Lib,
+}
+
+impl TargetKind {
+    fn new(c: &CrateSpec) -> Self {
+        match c.crate_type {
+            CrateType::Bin => Self::Bin,
+            CrateType::Rlib
+            | CrateType::Lib
+            | CrateType::Dylib
+            | CrateType::Cdylib
+            | CrateType::Staticlib
+            | CrateType::ProcMacro => Self::Lib,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Build {
+    /// The name associated with this crate. Build system-specific.
+    pub label: String,
+    /// Path corresponding to the build system-specific file defining the crate.
+    pub build_file: String,
+    /// The kind of target.
+    pub target_kind: TargetKind,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -170,6 +205,11 @@ pub fn generate_rust_project(
                     env: Some(c.env.clone()),
                     is_proc_macro: c.proc_macro_dylib_path.is_some(),
                     proc_macro_dylib_path: c.proc_macro_dylib_path.clone(),
+                    build: c.build_file.as_ref().map(|build_file| Build {
+                        label: c.bazel_target.as_string(),
+                        build_file: build_file.to_string_lossy().to_string(),
+                        target_kind: TargetKind::new(&c),
+                    }),
                 });
             }
         }

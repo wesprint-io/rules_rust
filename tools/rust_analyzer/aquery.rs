@@ -13,6 +13,7 @@ struct AqueryOutput {
     actions: Vec<Action>,
     #[serde(rename = "pathFragments")]
     path_fragments: Vec<PathFragment>,
+    targets: Vec<Target>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,13 +32,86 @@ struct PathFragment {
 }
 
 #[derive(Debug, Deserialize)]
+struct Target {
+    id: u32,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct Action {
     #[serde(rename = "outputIds")]
     output_ids: Vec<u32>,
+    #[serde(rename = "targetId")]
+    target_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CrateType {
+    Bin,
+    Rlib,
+    Lib,
+    Dylib,
+    Cdylib,
+    Staticlib,
+    ProcMacro,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BazelCrateSpec {
+    pub aliases: BTreeMap<String, String>,
+    pub crate_id: String,
+    pub display_name: String,
+    pub edition: String,
+    pub root_module: String,
+    pub is_workspace_member: bool,
+    pub deps: BTreeSet<String>,
+    pub proc_macro_dylib_path: Option<String>,
+    pub source: Option<CrateSpecSource>,
+    pub cfg: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub target: String,
+    pub crate_type: CrateType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BazelTarget(String);
+
+impl BazelTarget {
+    pub fn new(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+
+    pub fn build_file(&self, workspace: &Path) -> anyhow::Result<Option<PathBuf>> {
+        if self.0.starts_with("@") {
+            // External targets don't have a BUILD.bazel file in the repository.
+            return Ok(None);
+        }
+
+        if !self.0.starts_with("//") {
+            return Err(anyhow::anyhow!("Failed to parse bazel target: {}", self.0));
+        }
+
+        let mut build_file = PathBuf::new();
+        build_file.push(workspace);
+        build_file.push(
+            self.0
+                .split(":")
+                .next()
+                .unwrap_or(&self.0)
+                .trim_start_matches("/"), // remove the '//' characters at the begginning of the target path
+        );
+        build_file.push("BUILD.bazel");
+        Ok(Some(build_file))
+    }
+
+    pub fn as_string(&self) -> String {
+        self.0.clone()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CrateSpec {
     pub aliases: BTreeMap<String, String>,
     pub crate_id: String,
@@ -51,7 +125,34 @@ pub struct CrateSpec {
     pub cfg: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub target: String,
-    pub crate_type: String,
+    pub crate_type: CrateType,
+    // additional metadata
+    pub build_file: Option<PathBuf>,
+    pub bazel_target: BazelTarget,
+}
+
+impl CrateSpec {
+    fn new(workspace: &Path, target: BazelTarget, spec: BazelCrateSpec) -> anyhow::Result<Self> {
+        let build_file = target.build_file(workspace)?;
+
+        Ok(Self {
+            aliases: spec.aliases,
+            crate_id: spec.crate_id,
+            display_name: spec.display_name,
+            edition: spec.edition,
+            root_module: spec.root_module,
+            is_workspace_member: spec.is_workspace_member,
+            deps: spec.deps,
+            proc_macro_dylib_path: spec.proc_macro_dylib_path,
+            source: spec.source,
+            cfg: spec.cfg,
+            env: spec.env,
+            target: spec.target,
+            crate_type: spec.crate_type,
+            bazel_target: target,
+            build_file,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -92,23 +193,25 @@ pub fn get_crate_specs(
     let crate_spec_files =
         parse_aquery_output_files(execution_root, &String::from_utf8(aquery_output.stdout)?)?;
 
-    let crate_specs = crate_spec_files
+    let crates = crate_spec_files
         .into_iter()
-        .map(|file| {
+        .map(|(target, file)| {
             let f = File::open(&file)
                 .with_context(|| format!("Failed to open file: {}", file.display()))?;
-            serde_json::from_reader(f)
-                .with_context(|| format!("Failed to deserialize file: {}", file.display()))
+            let spec = serde_json::from_reader(f)
+                .with_context(|| format!("Failed to deserialize file: {}", file.display()))?;
+
+            CrateSpec::new(workspace, target, spec)
         })
         .collect::<anyhow::Result<Vec<CrateSpec>>>()?;
 
-    consolidate_crate_specs(crate_specs)
+    consolidate_crate_specs(crates)
 }
 
 fn parse_aquery_output_files(
     execution_root: &Path,
     aquery_stdout: &str,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> anyhow::Result<Vec<(BazelTarget, PathBuf)>> {
     let out: AqueryOutput = serde_json::from_str(aquery_stdout).map_err(|_| {
         // Parsing to `AqueryOutput` failed, try parsing into a `serde_json::Value`:
         match serde_json::from_str::<serde_json::Value>(aquery_stdout) {
@@ -132,17 +235,30 @@ fn parse_aquery_output_files(
         .iter()
         .map(|pf| (pf.id, pf))
         .collect::<BTreeMap<_, _>>();
+    let targets = out
+        .targets
+        .iter()
+        .map(|t| (t.id, t.label.clone()))
+        .collect::<BTreeMap<_, _>>();
 
-    let mut output_files: Vec<PathBuf> = Vec::new();
+    let mut output_files: Vec<(BazelTarget, PathBuf)> = Vec::new();
     for action in out.actions {
+        let target = targets.get(&action.target_id).expect(
+            format!(
+                "internal consistency error in bazel output: missing target for {}",
+                action.target_id
+            )
+            .as_str(),
+        );
+
         for output_id in action.output_ids {
             let artifact = artifacts
                 .get(&output_id)
-                .expect("internal consistency error in bazel output");
+                .expect("internal consistency error in bazel output: missing artifact");
             let path = path_from_fragments(artifact.path_fragment_id, &path_fragments)?;
             let path = execution_root.join(path);
             if path.exists() {
-                output_files.push(path);
+                output_files.push((BazelTarget::new(&target), path));
             } else {
                 log::warn!("Skipping missing crate_spec file: {:?}", path);
             }
@@ -185,9 +301,9 @@ fn consolidate_crate_specs(crate_specs: Vec<CrateSpec>) -> anyhow::Result<BTreeS
             // seems to use display_name for matching crate entries in rust-project.json
             // against symbols in source files. For more details, see
             // https://github.com/bazelbuild/rules_rust/issues/1032
-            if spec.crate_type == "rlib" {
+            if spec.crate_type == CrateType::Rlib {
                 existing.display_name = spec.display_name;
-                existing.crate_type = "rlib".into();
+                existing.crate_type = CrateType::Rlib;
             }
 
             // For proc-macro crates that exist within the workspace, there will be a
