@@ -32,6 +32,10 @@ crates_vendor(
         "serde_json": crate.spec(
             version = "1.0.102",
         ),
+        "camino": crate.spec(
+            features = ["serde1"],
+            version = "1.1.6",
+        ),
     },
     # Short for 'rules_rust rust_analyzer'. Keep this short to reduce
     # the risk to bump into absolute path length issues on Windows. See:
