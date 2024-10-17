@@ -1,15 +1,95 @@
 use core::str;
-use std::collections::HashMap;
+use std::io::BufRead;
 use std::process::Command;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{anyhow, Context};
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use runfiles::Runfiles;
 
 mod aquery;
 mod rust_project;
 
 use rust_project::{DiscoverProject, RustProject};
+use serde::Deserialize;
+
+#[derive(PartialEq, Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RustAnalyzerArg {
+    Path(Utf8PathBuf),
+    Buildfile(Utf8PathBuf),
+    Label(String),
+}
+
+impl RustAnalyzerArg {
+    pub fn into_targets(
+        self,
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+    ) -> anyhow::Result<Vec<String>> {
+        match self {
+            RustAnalyzerArg::Path(path) => Self::query_file_targets(bazel, workspace, path),
+            RustAnalyzerArg::Buildfile(buildfile) => {
+                Self::query_buildfile_targets(bazel, workspace, &buildfile)
+            }
+            RustAnalyzerArg::Label(s) => Ok(vec![s]),
+        }
+    }
+
+    fn query_file_targets(
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+        path: Utf8PathBuf,
+    ) -> anyhow::Result<Vec<String>> {
+        let bytes = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(path)
+            .output()?
+            .stdout;
+
+        let path = str::from_utf8(&bytes)?
+            .split(':')
+            .next()
+            .expect("string split must have one item");
+
+        Ok(vec![format!("{path}:*")])
+    }
+
+    fn query_buildfile_targets(
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+        buildfile: &Utf8Path,
+    ) -> anyhow::Result<Vec<String>> {
+        let bytes = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(buildfile)
+            .output()?
+            .stdout;
+
+        let path = String::from_utf8(bytes)?;
+
+        let targets = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(format!(r#"'kind("rust_.* rule", siblings({path}))'"#))
+            .output()?
+            .stdout
+            .lines()
+            .collect::<Result<_, _>>()?;
+
+        Ok(targets)
+    }
+}
+
+impl FromStr for RustAnalyzerArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("rust analyzer argument error: {e}"))
+    }
+}
 
 pub fn generate_crate_info(
     bazel: impl AsRef<Utf8Path>,

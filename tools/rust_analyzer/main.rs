@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io;
 use std::io::BufWriter;
 use std::process::Command;
-use std::str::FromStr;
 
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
@@ -11,7 +10,7 @@ use clap::Subcommand;
 use gen_rust_project_lib::discover_project;
 use gen_rust_project_lib::generate_crate_info;
 use gen_rust_project_lib::write_rust_project;
-use serde::Deserialize;
+use gen_rust_project_lib::RustAnalyzerArg;
 
 // TODO(david): This shells out to an expected rule in the workspace root //:rust_analyzer that the user must define.
 // It would be more convenient if it could automatically discover all the rust code in the workspace if this target
@@ -160,20 +159,4 @@ struct Config {
 pub enum Invocation {
     RustAnalyzer { arg: Option<RustAnalyzerArg> },
     Regular,
-}
-
-#[derive(PartialEq, Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RustAnalyzerArg {
-    Path(Utf8PathBuf),
-    Buildfile(Utf8PathBuf),
-    Label(String),
-}
-
-impl FromStr for RustAnalyzerArg {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("rust analyzer argument error: {e}"))
-    }
 }
