@@ -1,22 +1,23 @@
 use std::collections::HashMap;
+use std::io;
+use std::io::BufWriter;
 use std::process::Command;
+use std::str::FromStr;
 
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use clap::Parser;
 use clap::Subcommand;
+use gen_rust_project_lib::discover_project;
 use gen_rust_project_lib::generate_crate_info;
-use gen_rust_project_lib::generate_rust_project;
 use gen_rust_project_lib::write_rust_project;
-use gen_rust_project_lib::RustAnalyzerArgument;
-use gen_rust_project_lib::RustProject;
-use serde::Serialize;
+use serde::Deserialize;
 
 // TODO(david): This shells out to an expected rule in the workspace root //:rust_analyzer that the user must define.
 // It would be more convenient if it could automatically discover all the rust code in the workspace if this target
 // does not exist.
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    // env_logger::init();
 
     let config = parse_config()?;
 
@@ -37,43 +38,42 @@ fn main() -> anyhow::Result<()> {
 
     let rules_rust_name = env!("ASPECT_REPOSITORY");
 
-    let (targets, write_project) = match config.command {
-        CommandKind::User { targets } => (targets, true),
-        CommandKind::RustAnalyzer { ra_arg } => {
-            (ra_arg.into_targets(&config.bazel, workspace_root)?, false)
-        }
-    };
-
     // Generate the crate specs.
-    generate_crate_info(&config.bazel, workspace_root, rules_rust_name, &targets)?;
+    generate_crate_info(
+        &config.bazel,
+        workspace_root,
+        rules_rust_name,
+        &config.targets,
+    )?;
 
-    if !write_project {
-        let project = generate_rust_project(
-            &config.bazel,
-            workspace_root,
-            rules_rust_name,
-            &targets,
-            execution_root,
-        )?;
-        let output = Output {
-            kind: "finished".to_string(),
-            buildfile: "".to_string().into(),
-            project,
-        };
+    let invocation = config.invocation.unwrap_or(Invocation::Regular);
 
-        let out_str = serde_json::to_string(&output)?;
-        println!("{out_str}");
-    } else {
-        // Use the generated files to write rust-project.json.
-        write_rust_project(
-            &config.bazel,
-            workspace_root,
-            &rules_rust_name,
-            &targets,
-            execution_root,
-            output_base,
-            workspace_root.join("rust-project.json"),
-        )?;
+    match invocation {
+        Invocation::RustAnalyzer { arg } => {
+            log::debug!("rust-analyzer argument: {arg:?}");
+
+            let discovery = discover_project(
+                &config.bazel,
+                workspace_root,
+                &rules_rust_name,
+                &config.targets,
+                execution_root,
+            );
+            let writer = BufWriter::new(io::stdout());
+            serde_json::to_writer(writer, &discovery)?;
+        }
+        Invocation::Regular => {
+            // Use the generated files to write rust-project.json.
+            write_rust_project(
+                &config.bazel,
+                workspace_root,
+                &rules_rust_name,
+                &config.targets,
+                execution_root,
+                output_base,
+                workspace_root.join("rust-project.json"),
+            )?;
+        }
     }
 
     Ok(())
@@ -148,25 +148,32 @@ struct Config {
     #[clap(long, default_value = "bazel")]
     bazel: Utf8PathBuf,
 
+    /// Argument to signal how the CLI was invoked.
     #[clap(subcommand)]
-    command: CommandKind,
+    invocation: Option<Invocation>,
+
+    /// Space separated list of target patterns that comes after all other args.
+    #[clap(default_value = "@//...")]
+    targets: Vec<String>,
+}
+#[derive(Subcommand, Debug)]
+pub enum Invocation {
+    RustAnalyzer { arg: Option<RustAnalyzerArg> },
+    Regular,
 }
 
-#[derive(Debug, Subcommand)]
-enum CommandKind {
-    User {
-        /// Space separated list of target patterns that comes after all other args.
-        #[clap(default_value = "@//...")]
-        targets: Vec<String>,
-    },
-    RustAnalyzer {
-        ra_arg: RustAnalyzerArgument,
-    },
+#[derive(PartialEq, Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RustAnalyzerArg {
+    Path(Utf8PathBuf),
+    Buildfile(Utf8PathBuf),
+    Label(String),
 }
 
-#[derive(Debug, Serialize)]
-struct Output {
-    kind: String,
-    buildfile: Utf8PathBuf,
-    project: RustProject,
+impl FromStr for RustAnalyzerArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|e| anyhow::anyhow!("rust analyzer argument error: {e}"))
+    }
 }

@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
+use label::Label;
 use serde::Deserialize;
 
 use crate::rust_project::TargetKind;
@@ -98,13 +99,6 @@ impl From<CrateType> for TargetKind {
 pub struct CrateSpecSource {
     pub exclude_dirs: Vec<Utf8PathBuf>,
     pub include_dirs: Vec<Utf8PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum Input {
-    Targets(Vec<Target>),
-    Files(Vec<Utf8PathBuf>),
-    Buildfile(Vec<Utf8PathBuf>),
 }
 
 pub fn get_crate_specs(
@@ -269,18 +263,11 @@ fn consolidate_crate_specs(crate_specs: Vec<CrateSpec>) -> anyhow::Result<BTreeS
 }
 
 fn label_to_build_file(label: &str, workspace: &Utf8Path) -> Option<Utf8PathBuf> {
-    if label.starts_with("@") {
-        // External targets don't have a BUILD.bazel file in the repository.
-        return None;
-    }
+    let label = Label::analyze(label).ok()?;
+    // External targets don't have a BUILD.bazel file in the repository.
+    let package = label.repo().is_none().then(|| label.package()).flatten()?;
 
-    let path = label
-        .split(":")
-        .next()
-        .expect("first string element must exist in split")
-        .trim_start_matches("/"); // remove the '//' characters at the begginning of the target path
-
-    let build_bazel_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD.bazel".as_ref()]
+    let build_bazel_file: Utf8PathBuf = [workspace.as_str(), package, "BUILD.bazel"]
         .iter()
         .collect();
 
@@ -288,9 +275,7 @@ fn label_to_build_file(label: &str, workspace: &Utf8Path) -> Option<Utf8PathBuf>
         return Some(build_bazel_file);
     }
 
-    let build_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD".as_ref()]
-        .iter()
-        .collect();
+    let build_file: Utf8PathBuf = [workspace.as_str(), package, "BUILD"].iter().collect();
 
     if build_file.exists() {
         return Some(build_file);

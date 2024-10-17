@@ -10,6 +10,24 @@ use serde::Serialize;
 
 use crate::aquery::CrateSpec;
 
+/// The format that rust_analyzer expects as a response when automatically invoked.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind")]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoverProject {
+    Finished {
+        buildfile: Utf8PathBuf,
+        project: RustProject,
+    },
+    Error {
+        error: String,
+        source: Option<String>,
+    },
+    Progress {
+        message: String,
+    },
+}
+
 /// A `rust-project.json` workspace representation. See
 /// [rust-analyzer documentation][rd] for a thorough description of this interface.
 /// [rd]: https://rust-analyzer.github.io/manual.html#non-cargo-based-projects
@@ -49,12 +67,6 @@ pub struct RustProject {
     /// several different "sysroots" in one graph of
     /// crates.
     sysroot_src: Option<Utf8PathBuf>,
-    /// List of groups of common cfg values, to allow
-    /// sharing them between crates.
-    ///
-    /// Maps from group name to its cfgs. Cfg follow
-    /// the same format as `Crate.cfg`.
-    cfg_groups: BTreeMap<String, Vec<String>>,
     /// The set of crates comprising the current
     /// project. Must include all transitive
     /// dependencies as well as sysroot crate (libstd,
@@ -79,14 +91,8 @@ pub struct Crate {
     /// Edition of the crate.
     edition: String,
 
-    /// Crate version
-    version: Option<String>,
-
     /// Dependencies
     deps: Vec<Dependency>,
-
-    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    cfg_groups: BTreeSet<String>,
 
     /// The set of cfgs activated for a given crate, like
     /// `["unix", "feature=\"foo\"", "feature=\"bar\""]`.
@@ -117,9 +123,6 @@ pub struct Crate {
     is_proc_macro: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    repository: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     build: Option<Build>,
 }
 
@@ -129,7 +132,7 @@ pub enum TargetKind {
     Bin,
     /// Any kind of Cargo lib crate-type (dylib, rlib, proc-macro, ...).
     Lib,
-    Test,
+    // Test,
 }
 
 /// A template-like structure for describing runnables.
@@ -179,9 +182,8 @@ pub struct Runnable {
 pub enum RunnableKind {
     Check,
 
-    /// Can run a binary.
-    Run,
-
+    // /// Can run a binary.
+    // Run,
     /// Run a single test.
     TestOne,
 }
@@ -244,7 +246,6 @@ pub fn generate_rust_project(
         sysroot: Some(sysroot.into()),
         sysroot_src: Some(sysroot_src.into()),
         crates: Vec::new(),
-        cfg_groups: BTreeMap::new(),
         runnables: vec![
             Runnable {
                 program: "bazel".to_owned(),
@@ -331,9 +332,6 @@ pub fn generate_rust_project(
                         build_file: build_file.to_owned(),
                         target_kind: c.crate_type.into(),
                     }),
-                    version: None,
-                    cfg_groups: BTreeSet::new(),
-                    repository: None,
                 });
             }
         }

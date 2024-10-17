@@ -19,7 +19,6 @@ rust_binary(
         "//tools/rust_analyzer/3rdparty/crates:log",
         "//tools/rust_analyzer/3rdparty/crates:serde",
         "//tools/rust_analyzer/3rdparty/crates:serde_json",
-        "//util/label",
     ],
 )
 
@@ -40,6 +39,7 @@ rust_library(
         "//tools/rust_analyzer/3rdparty/crates:log",
         "//tools/rust_analyzer/3rdparty/crates:serde",
         "//tools/rust_analyzer/3rdparty/crates:serde_json",
+        "//util/label",
     ],
 )
 
