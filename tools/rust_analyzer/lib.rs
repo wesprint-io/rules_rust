@@ -1,4 +1,6 @@
+use core::str;
 use std::process::Command;
+use std::str::FromStr;
 use std::{collections::HashMap, io::BufRead};
 
 use anyhow::anyhow;
@@ -8,6 +10,9 @@ use runfiles::Runfiles;
 mod aquery;
 mod rust_project;
 
+pub use rust_project::RustProject;
+use serde::Deserialize;
+
 #[derive(PartialEq, Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RustAnalyzerArgument {
@@ -16,19 +21,24 @@ pub enum RustAnalyzerArgument {
     Label(String),
 }
 
+impl FromStr for RustAnalyzerArgument {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(From::from)
+    }
+}
+
 impl RustAnalyzerArgument {
     pub fn into_targets(
         self,
         bazel: &Utf8Path,
         workspace: &Utf8Path,
-        rules_rust: &Utf8Path,
     ) -> anyhow::Result<Vec<String>> {
         match self {
-            RustAnalyzerArgument::Path(path) => {
-                Self::query_file_targets(bazel, workspace, rules_rust, path)
-            }
+            RustAnalyzerArgument::Path(path) => Self::query_file_targets(bazel, workspace, path),
             RustAnalyzerArgument::Buildfile(buildfile) => {
-                Self::query_buildfile_targets(bazel, workspace, rules_rust, &buildfile)
+                Self::query_buildfile_targets(bazel, workspace, &buildfile)
             }
             RustAnalyzerArgument::Label(s) => Ok(vec![s]),
         }
@@ -37,8 +47,7 @@ impl RustAnalyzerArgument {
     fn query_file_targets(
         bazel: &Utf8Path,
         workspace: &Utf8Path,
-        rules_rust: &Utf8Path,
-        path: &Utf8Path,
+        path: Utf8PathBuf,
     ) -> anyhow::Result<Vec<String>> {
         let bytes = Command::new(bazel)
             .current_dir(workspace)
@@ -47,14 +56,17 @@ impl RustAnalyzerArgument {
             .output()?
             .stdout;
 
-        let target = String::from_utf8(bytes)?;
-        Ok(target)
+        let path = str::from_utf8(&bytes)?
+            .split(':')
+            .next()
+            .expect("string split must have one item");
+
+        Ok(vec![format!("{path}:*")])
     }
 
     fn query_buildfile_targets(
         bazel: &Utf8Path,
         workspace: &Utf8Path,
-        rules_rust: &Utf8Path,
         buildfile: &Utf8Path,
     ) -> anyhow::Result<Vec<String>> {
         let bytes = Command::new(bazel)
@@ -113,15 +125,13 @@ pub fn generate_crate_info(
     Ok(())
 }
 
-pub fn write_rust_project(
+pub fn generate_rust_project(
     bazel: impl AsRef<Utf8Path>,
     workspace: impl AsRef<Utf8Path>,
-    rules_rust_name: &impl AsRef<str>,
+    rules_rust_name: impl AsRef<str>,
     targets: &[String],
     execution_root: impl AsRef<Utf8Path>,
-    output_base: impl AsRef<Utf8Path>,
-    rust_project_path: impl AsRef<Utf8Path>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RustProject> {
     let crate_specs = aquery::get_crate_specs(
         bazel.as_ref(),
         workspace.as_ref(),
@@ -146,6 +156,26 @@ pub fn write_rust_project(
         sysroot,
         sysroot_src,
         &crate_specs,
+    )?;
+
+    Ok(rust_project)
+}
+
+pub fn write_rust_project(
+    bazel: impl AsRef<Utf8Path>,
+    workspace: impl AsRef<Utf8Path>,
+    rules_rust_name: impl AsRef<str>,
+    targets: &[String],
+    execution_root: impl AsRef<Utf8Path>,
+    output_base: impl AsRef<Utf8Path>,
+    rust_project_path: impl AsRef<Utf8Path>,
+) -> anyhow::Result<()> {
+    let rust_project = generate_rust_project(
+        bazel.as_ref(),
+        workspace.as_ref(),
+        rules_rust_name.as_ref(),
+        targets,
+        execution_root.as_ref(),
     )?;
 
     rust_project::write_rust_project(

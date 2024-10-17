@@ -4,9 +4,13 @@ use std::process::Command;
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use clap::Parser;
+use clap::Subcommand;
 use gen_rust_project_lib::generate_crate_info;
+use gen_rust_project_lib::generate_rust_project;
 use gen_rust_project_lib::write_rust_project;
 use gen_rust_project_lib::RustAnalyzerArgument;
+use gen_rust_project_lib::RustProject;
+use serde::Serialize;
 
 // TODO(david): This shells out to an expected rule in the workspace root //:rust_analyzer that the user must define.
 // It would be more convenient if it could automatically discover all the rust code in the workspace if this target
@@ -33,26 +37,44 @@ fn main() -> anyhow::Result<()> {
 
     let rules_rust_name = env!("ASPECT_REPOSITORY");
 
-    let targets = match config.command {
-        Subcommand::User { targets } => targets,
-        Subcommand::RustAnalyzer { ra_arg } => {
-            ra_arg.into_targets(&config.bazel, workspace_root, rules_rust_name)?
+    let (targets, write_project) = match config.command {
+        CommandKind::User { targets } => (targets, true),
+        CommandKind::RustAnalyzer { ra_arg } => {
+            (ra_arg.into_targets(&config.bazel, workspace_root)?, false)
         }
     };
 
     // Generate the crate specs.
     generate_crate_info(&config.bazel, workspace_root, rules_rust_name, &targets)?;
 
-    // Use the generated files to write rust-project.json.
-    write_rust_project(
-        &config.bazel,
-        workspace_root,
-        &rules_rust_name,
-        &targets,
-        execution_root,
-        output_base,
-        workspace_root.join("rust-project.json"),
-    )?;
+    if !write_project {
+        let project = generate_rust_project(
+            &config.bazel,
+            workspace_root,
+            rules_rust_name,
+            &targets,
+            execution_root,
+        )?;
+        let output = Output {
+            kind: "finished".to_string(),
+            buildfile: "".to_string().into(),
+            project,
+        };
+
+        let out_str = serde_json::to_string(&output)?;
+        println!("{out_str}");
+    } else {
+        // Use the generated files to write rust-project.json.
+        write_rust_project(
+            &config.bazel,
+            workspace_root,
+            &rules_rust_name,
+            &targets,
+            execution_root,
+            output_base,
+            workspace_root.join("rust-project.json"),
+        )?;
+    }
 
     Ok(())
 }
@@ -127,11 +149,11 @@ struct Config {
     bazel: Utf8PathBuf,
 
     #[clap(subcommand)]
-    command: Subcommand,
+    command: CommandKind,
 }
 
 #[derive(Debug, Subcommand)]
-enum Subcommand {
+enum CommandKind {
     User {
         /// Space separated list of target patterns that comes after all other args.
         #[clap(default_value = "@//...")]
@@ -140,4 +162,11 @@ enum Subcommand {
     RustAnalyzer {
         ra_arg: RustAnalyzerArgument,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct Output {
+    kind: String,
+    buildfile: Utf8PathBuf,
+    project: RustProject,
 }

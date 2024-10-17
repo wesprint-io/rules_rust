@@ -32,7 +32,7 @@ struct PathFragment {
     parent_id: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Target {
     id: u32,
@@ -63,6 +63,7 @@ pub struct CrateSpec {
     pub target: String,
     pub crate_type: CrateType,
     pub build_file: Option<Utf8PathBuf>,
+    #[serde(default)]
     pub bazel_target: String,
 }
 
@@ -102,8 +103,8 @@ pub struct CrateSpecSource {
 #[derive(Debug, Clone)]
 pub(crate) enum Input {
     Targets(Vec<Target>),
-    Files(Vec<PathBuf>),
-    Buildfile(Vec<PathBuf>),
+    Files(Vec<Utf8PathBuf>),
+    Buildfile(Vec<Utf8PathBuf>),
 }
 
 pub fn get_crate_specs(
@@ -280,7 +281,7 @@ fn label_to_build_file(label: &str, workspace: &Utf8Path) -> Option<Utf8PathBuf>
         .trim_start_matches("/"); // remove the '//' characters at the begginning of the target path
 
     let build_bazel_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD.bazel".as_ref()]
-        .into_iter()
+        .iter()
         .collect();
 
     if build_bazel_file.exists() {
@@ -288,7 +289,7 @@ fn label_to_build_file(label: &str, workspace: &Utf8Path) -> Option<Utf8PathBuf>
     }
 
     let build_file: Utf8PathBuf = [workspace, path.as_ref(), "BUILD".as_ref()]
-        .into_iter()
+        .iter()
         .collect();
 
     if build_file.exists() {
