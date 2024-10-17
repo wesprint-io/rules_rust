@@ -6,6 +6,7 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 use gen_rust_project_lib::generate_crate_info;
 use gen_rust_project_lib::write_rust_project;
+use gen_rust_project_lib::RustAnalyzerArgument;
 
 // TODO(david): This shells out to an expected rule in the workspace root //:rust_analyzer that the user must define.
 // It would be more convenient if it could automatically discover all the rust code in the workspace if this target
@@ -32,20 +33,22 @@ fn main() -> anyhow::Result<()> {
 
     let rules_rust_name = env!("ASPECT_REPOSITORY");
 
+    let targets = match config.command {
+        Subcommand::User { targets } => targets,
+        Subcommand::RustAnalyzer { ra_arg } => {
+            ra_arg.into_targets(&config.bazel, workspace_root, rules_rust_name)?
+        }
+    };
+
     // Generate the crate specs.
-    generate_crate_info(
-        &config.bazel,
-        workspace_root,
-        rules_rust_name,
-        &config.targets,
-    )?;
+    generate_crate_info(&config.bazel, workspace_root, rules_rust_name, &targets)?;
 
     // Use the generated files to write rust-project.json.
     write_rust_project(
         &config.bazel,
         workspace_root,
         &rules_rust_name,
-        &config.targets,
+        &targets,
         execution_root,
         output_base,
         workspace_root.join("rust-project.json"),
@@ -123,7 +126,18 @@ struct Config {
     #[clap(long, default_value = "bazel")]
     bazel: Utf8PathBuf,
 
-    /// Space separated list of target patterns that comes after all other args.
-    #[clap(default_value = "@//...")]
-    targets: Vec<String>,
+    #[clap(subcommand)]
+    command: Subcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum Subcommand {
+    User {
+        /// Space separated list of target patterns that comes after all other args.
+        #[clap(default_value = "@//...")]
+        targets: Vec<String>,
+    },
+    RustAnalyzer {
+        ra_arg: RustAnalyzerArgument,
+    },
 }

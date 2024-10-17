@@ -99,6 +99,13 @@ pub struct CrateSpecSource {
     pub include_dirs: Vec<Utf8PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum Input {
+    Targets(Vec<Target>),
+    Files(Vec<PathBuf>),
+    Buildfile(Vec<PathBuf>),
+}
+
 pub fn get_crate_specs(
     bazel: &Utf8Path,
     workspace: &Utf8Path,

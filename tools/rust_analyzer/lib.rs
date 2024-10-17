@@ -1,18 +1,88 @@
-use std::collections::HashMap;
-use std::path::Path;
 use std::process::Command;
+use std::{collections::HashMap, io::BufRead};
 
 use anyhow::anyhow;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use runfiles::Runfiles;
 
 mod aquery;
 mod rust_project;
 
+#[derive(PartialEq, Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RustAnalyzerArgument {
+    Path(Utf8PathBuf),
+    Buildfile(Utf8PathBuf),
+    Label(String),
+}
+
+impl RustAnalyzerArgument {
+    pub fn into_targets(
+        self,
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+        rules_rust: &Utf8Path,
+    ) -> anyhow::Result<Vec<String>> {
+        match self {
+            RustAnalyzerArgument::Path(path) => {
+                Self::query_file_targets(bazel, workspace, rules_rust, path)
+            }
+            RustAnalyzerArgument::Buildfile(buildfile) => {
+                Self::query_buildfile_targets(bazel, workspace, rules_rust, &buildfile)
+            }
+            RustAnalyzerArgument::Label(s) => Ok(vec![s]),
+        }
+    }
+
+    fn query_file_targets(
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+        rules_rust: &Utf8Path,
+        path: &Utf8Path,
+    ) -> anyhow::Result<Vec<String>> {
+        let bytes = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(path)
+            .output()?
+            .stdout;
+
+        let target = String::from_utf8(bytes)?;
+        Ok(target)
+    }
+
+    fn query_buildfile_targets(
+        bazel: &Utf8Path,
+        workspace: &Utf8Path,
+        rules_rust: &Utf8Path,
+        buildfile: &Utf8Path,
+    ) -> anyhow::Result<Vec<String>> {
+        let bytes = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(buildfile)
+            .output()?
+            .stdout;
+
+        let path = String::from_utf8(bytes)?;
+
+        let targets = Command::new(bazel)
+            .current_dir(workspace)
+            .arg("query")
+            .arg(format!(r#"'kind("rust_.* rule", siblings({path}))'"#))
+            .output()?
+            .stdout
+            .lines()
+            .collect::<Result<_, _>>()?;
+
+        Ok(targets)
+    }
+}
+
 pub fn generate_crate_info(
-    bazel: impl AsRef<Path>,
-    workspace: impl AsRef<Path>,
-    rules_rust: impl AsRef<str>,
+    bazel: impl AsRef<Utf8Path>,
+    workspace: impl AsRef<Utf8Path>,
+    rules_rust: impl AsRef<Utf8Path>,
     targets: &[String],
 ) -> anyhow::Result<()> {
     log::debug!("Building rust_analyzer_crate_spec files for {:?}", targets);
